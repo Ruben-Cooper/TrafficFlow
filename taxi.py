@@ -3,11 +3,8 @@ from dash import html, Output, Input, dcc
 import dash_leaflet as dl
 import requests
 import os
-import osmnx as ox
 import pandas as pd
-import math
-from shapely.geometry import LineString
-import pandas as pd
+from datetime import datetime
 
 # Set up API key
 apiKey = '7QIl8HqHstNjUcx5Ljvd5zWr0OAzAJor'  # Replace with your TomTom API key
@@ -34,46 +31,58 @@ for filename in os.listdir(data_folder):
 # Combine all data
 taxi_data = pd.concat(all_taxi_data, ignore_index=True)
 taxi_data.sort_values(by='time', inplace=True)
-taxi_data['datetime'] = pd.to_datetime(taxi_data['time'], unit='s')
 
-# Get start and end times
-start_time = taxi_data['time'].min()
-end_time = taxi_data['time'].max()
-delta_time = 60  # seconds per interval
+# Ensure 'time' is numeric
+taxi_data['time'] = pd.to_numeric(taxi_data['time'], errors='coerce')
 
-# Map UNIX timestamps to formatted date strings for slider marks
-def generate_slider_marks(start, end, step):
-    marks = {}
-    for t in range(int(start), int(end)+1, step):
-        readable_time = pd.to_datetime(t, unit='s').strftime('%Y-%m-%d %H:%M')
-        marks[t] = readable_time
-    return marks
+# Drop rows with NaN 'time' values
+taxi_data = taxi_data.dropna(subset=['time'])
+
+# Convert 'time' to integer
+taxi_data['time'] = taxi_data['time'].astype(int)
+
+# Convert 'time' to datetime
+taxi_data['datetime'] = pd.to_datetime(taxi_data['time'], unit='s', errors='coerce')
+
+# Drop rows with NaT in 'datetime'
+taxi_data = taxi_data.dropna(subset=['datetime'])
+
+# Extract unique dates
+unique_dates = taxi_data['datetime'].dt.date.unique()
+min_date = min(unique_dates)
+max_date = max(unique_dates)
+
+# Convert dates to strings for DatePickerSingle
+min_date_str = min_date.isoformat()
+max_date_str = max_date.isoformat()
 
 # Define the app layout
 app.layout = html.Div([
-    html.H1("Interactive Zoomable Map with Traffic Flow Overlay and Simulated Traffic"),
+    html.H1("Interactive Map with Simulated Taxi Traffic"),
     html.Button('Stop Animation', id='stop-button', n_clicks=0),
     html.Div([
         html.Div([
             html.Pre(id='info', children='Click on the map to get traffic data.'),
             html.Div(id='current-time-display'),
-            html.Label('Select Time:'),
-            dcc.Slider(
-                id='time-slider',
-                min=start_time,
-                max=end_time,
-                value=start_time,
-                marks=generate_slider_marks(start_time, end_time, step=3600*6),  # Every 6 hours
-                step=delta_time
+            html.Label('Select Date:'),
+            dcc.DatePickerSingle(
+                id='date-picker',
+                min_date_allowed=min_date_str,
+                max_date_allowed=max_date_str,
+                date=min_date_str,
+                display_format='YYYY-MM-DD'
             ),
-            html.Label('Simulation Speed (seconds per interval):'),
-            dcc.Slider(
-                id='delta-time-slider',
-                min=10,
-                max=600,
-                step=10,
-                value=60,
-                marks={i: str(i) for i in range(10, 601, 50)}
+            html.Label('Simulation Speed:'),
+            dcc.RadioItems(
+                id='speed-multiplier',
+                options=[
+                    {'label': '1x', 'value': 1},
+                    {'label': '2x', 'value': 2},
+                    {'label': '4x', 'value': 4},
+                    {'label': '8x', 'value': 8},
+                ],
+                value=1,  # default to 1x speed
+                labelStyle={'display': 'inline-block'}
             )
         ], style={'width': '25%', 'display': 'inline-block', 'vertical-align': 'top'}),
         html.Div([
@@ -100,27 +109,92 @@ app.layout = html.Div([
     [Output('vehicles', 'children'),
      Output('current-time-display', 'children')],
     [Input('interval', 'n_intervals'),
-     Input('delta-time-slider', 'value'),
-     Input('time-slider', 'value'),
+     Input('speed-multiplier', 'value'),
+     Input('date-picker', 'date'),
      Input('stop-button', 'n_clicks')]
 )
-def update_vehicles(n_intervals, delta_time, slider_time, n_clicks):
+def update_vehicles(n_intervals, speed_multiplier, selected_date, n_clicks):
     # Determine if animation is stopped
     if n_clicks % 2 != 0:
         return dash.no_update, dash.no_update  # Do not update if stopped
 
-    current_time = slider_time + n_intervals * delta_time
+    if selected_date is None:
+        return dash.no_update, 'No date selected.'
+
+    # Convert selected_date to datetime
+    selected_date = pd.to_datetime(selected_date)
+
+    # Get the start timestamp of the selected day
+    start_of_day = pd.Timestamp(selected_date).tz_localize(None)
+    start_time = int(start_of_day.timestamp())
+
+    # delta_time is 1 second * speed_multiplier
+    delta_time = 1 * speed_multiplier
+
+    # current_time is start_time + n_intervals * delta_time
+    current_time = start_time + n_intervals * delta_time
+
+    # Check if current_time exceeds the max time for the selected day
+    end_of_day = start_of_day + pd.Timedelta(days=1)
+    end_time = int(end_of_day.timestamp())
+
     if current_time > end_time:
-        current_time = start_time  # Loop back to start
-    # Filter data up to current time
-    df_current = taxi_data[taxi_data['time'] <= current_time]
-    # Get latest position for each taxi
-    latest_positions = df_current.groupby('taxi_id').last().reset_index()
+        return dash.no_update, 'End of day reached.'
+
+    # Define a time window for active taxis (e.g., taxis that have data within the last 60 seconds)
+    time_window = 60  # seconds
+
+    # Filter data for the selected day within the time window
+    min_time = current_time - time_window
+    df_current = taxi_data[(taxi_data['time'] >= min_time) & (taxi_data['time'] <= current_time + time_window)]
+
+    # Group by taxi_id
+    grouped = df_current.groupby('taxi_id')
+
     markers = []
-    for idx, row in latest_positions.iterrows():
-        lat = row['lat']
-        lon = row['lon']
-        taxi_id = row['taxi_id']
+
+    for taxi_id, group in grouped:
+        # Sort the group by time
+        group = group.sort_values('time')
+
+        # Find data points before and after current_time
+        prev_points = group[group['time'] <= current_time]
+        next_points = group[group['time'] > current_time]
+
+        if not prev_points.empty:
+            prev_point = prev_points.iloc[-1]
+        else:
+            continue  # No previous point, skip this taxi
+
+        if not next_points.empty:
+            next_point = next_points.iloc[0]
+            # Interpolate position
+            t0 = prev_point['time']
+            t1 = next_point['time']
+            lat0 = prev_point['lat']
+            lon0 = prev_point['lon']
+            lat1 = next_point['lat']
+            lon1 = next_point['lon']
+
+            # Avoid division by zero
+            if t1 == t0:
+                ratio = 0
+            else:
+                ratio = (current_time - t0) / (t1 - t0)
+
+            lat = lat0 + (lat1 - lat0) * ratio
+            lon = lon0 + (lon1 - lon0) * ratio
+        else:
+            # No next point, check if the previous point is within the time window
+            time_diff = current_time - prev_point['time']
+            if time_diff > time_window:
+                continue  # Taxi is inactive
+            else:
+                # Use last known position
+                lat = prev_point['lat']
+                lon = prev_point['lon']
+
+        # Add marker
         marker = dl.Marker(
             position=[lat, lon],
             icon={
@@ -132,6 +206,7 @@ def update_vehicles(n_intervals, delta_time, slider_time, n_clicks):
             id=f"vehicle_{taxi_id}"
         )
         markers.append(marker)
+
     current_time_str = pd.to_datetime(current_time, unit='s').strftime('%Y-%m-%d %H:%M:%S')
     return markers, f"Current Time: {current_time_str}"
 
