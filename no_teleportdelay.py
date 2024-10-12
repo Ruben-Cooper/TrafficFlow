@@ -7,15 +7,15 @@ import osmnx as ox
 import networkx as nx
 import pandas as pd
 import random
-import math
+import time
 from shapely.geometry import LineString
 
 # Set up API key
 apiKey = '7QIl8HqHstNjUcx5Ljvd5zWr0OAzAJor'  # Replace with your TomTom API key
 
 # Define the starting latitude and longitude
-startLat = 37.74862   # Latitude
-startLon = -122.4228  # Longitude
+startLat = -27.47041   # Latitude
+startLon = 153.024754  # Longitude
 
 # Initialize the Dash app
 app = dash.Dash(__name__)
@@ -40,7 +40,7 @@ def generate_random_route(G):
         return None
 
 # Generate routes for multiple vehicles
-num_vehicles = 50
+num_vehicles = 100
 vehicles = []
 for idx in range(num_vehicles):
     route = None
@@ -68,64 +68,45 @@ for idx in range(num_vehicles):
         'edge_geometry': edge_geometry,
         'speed': 20,  # Speed in meters per second
         'current_position': (G.nodes[u]['y'], G.nodes[u]['x']),
-        'initial_position': (G.nodes[u]['y'], G.nodes[u]['x']),  # Save initial position
-        'waiting_time': 0,  # Time the vehicle waits before restarting
-        'restart_count': 0  # Number of times the vehicle has restarted
+        'loop_count': 0,  # Track route completion
+        'hidden_until': 0  # Time when vehicle will reappear
     })
 
 # Function to update vehicle positions
 def update_vehicle_positions(vehicles, delta_time=1.0):
+    current_time = time.time()
     for vehicle in vehicles:
-        if vehicle['waiting_time'] > 0:
-            vehicle['waiting_time'] -= delta_time
-            if vehicle['waiting_time'] <= 0:
-                # Reset vehicle to initial position
-                vehicle['edge_index'] = 0
-                vehicle['distance_traveled_on_edge'] = 0.0
-                vehicle['current_position'] = vehicle['initial_position']
-                vehicle['restart_count'] += 1  # Increment restart count
-                # Re-initialize edge_length and edge_geometry
-                u = vehicle['route'][vehicle['edge_index']]
-                v = vehicle['route'][vehicle['edge_index'] + 1]
-                edge_data = G.get_edge_data(u, v)
-                if edge_data is None:
-                    continue  # Skip if no edge between u and v
-                edge_data = list(edge_data.values())[0]
-                vehicle['edge_length'] = edge_data.get('length')
-                vehicle['edge_geometry'] = edge_data.get('geometry')
-                if vehicle['edge_geometry'] is None:
-                    x1, y1 = G.nodes[u]['x'], G.nodes[u]['y']
-                    x2, y2 = G.nodes[v]['x'], G.nodes[v]['y']
-                    vehicle['edge_geometry'] = LineString([(x1, y1), (x2, y2)])
-            else:
-                # Vehicle is waiting, do not update position
-                continue
-        else:
-            delta_distance = vehicle['speed'] * delta_time
-            vehicle['distance_traveled_on_edge'] += delta_distance
-            while vehicle['distance_traveled_on_edge'] >= vehicle['edge_length']:
-                vehicle['distance_traveled_on_edge'] -= vehicle['edge_length']
-                vehicle['edge_index'] += 1
-                if vehicle['edge_index'] >= len(vehicle['route']) - 1:
-                    vehicle['waiting_time'] = 10  # Set waiting time to 10 seconds
-                    break  # Exit the loop and stop moving
-                u = vehicle['route'][vehicle['edge_index']]
-                v = vehicle['route'][vehicle['edge_index'] + 1]
-                edge_data = G.get_edge_data(u, v)
-                if edge_data is None:
-                    continue  # Skip if no edge between u and v
-                edge_data = list(edge_data.values())[0]
-                vehicle['edge_length'] = edge_data.get('length')
-                vehicle['edge_geometry'] = edge_data.get('geometry')
-                if vehicle['edge_geometry'] is None:
-                    x1, y1 = G.nodes[u]['x'], G.nodes[u]['y']
-                    x2, y2 = G.nodes[v]['x'], G.nodes[v]['y']
-                    vehicle['edge_geometry'] = LineString([(x1, y1), (x2, y2)])
-            else:
-                # progress along edge
-                progress = vehicle['distance_traveled_on_edge'] / vehicle['edge_length']
-                position = vehicle['edge_geometry'].interpolate(progress, normalized=True)
-                vehicle['current_position'] = (position.y, position.x)
+        if current_time < vehicle['hidden_until']:
+            # Skip updating vehicle if it's in the hidden state
+            continue
+
+        delta_distance = vehicle['speed'] * delta_time
+        vehicle['distance_traveled_on_edge'] += delta_distance
+        while vehicle['distance_traveled_on_edge'] >= vehicle['edge_length']:
+            vehicle['distance_traveled_on_edge'] -= vehicle['edge_length']
+            vehicle['edge_index'] += 1
+            if vehicle['edge_index'] >= len(vehicle['route']) - 1:
+                vehicle['edge_index'] = 0  # Loop back to start
+                vehicle['loop_count'] += 1  # Increment loop_count when looping back
+                vehicle['hidden_until'] = current_time + 10  # Hide for 10 seconds
+                vehicle['current_position'] = (G.nodes[vehicle['route'][0]]['y'], G.nodes[vehicle['route'][0]]['x'])
+                break
+            u = vehicle['route'][vehicle['edge_index']]
+            v = vehicle['route'][vehicle['edge_index'] + 1]
+            edge_data = G.get_edge_data(u, v)
+            if edge_data is None:
+                continue  # Skip if no edge between u and v
+            edge_data = list(edge_data.values())[0]
+            vehicle['edge_length'] = edge_data.get('length')
+            vehicle['edge_geometry'] = edge_data.get('geometry')
+            if vehicle['edge_geometry'] is None:
+                x1, y1 = G.nodes[u]['x'], G.nodes[u]['y']
+                x2, y2 = G.nodes[v]['x'], G.nodes[v]['y']
+                vehicle['edge_geometry'] = LineString([(x1, y1), (x2, y2)])
+        # Progress along edge
+        progress = vehicle['distance_traveled_on_edge'] / vehicle['edge_length']
+        position = vehicle['edge_geometry'].interpolate(progress, normalized=True)
+        vehicle['current_position'] = (position.y, position.x)
     return vehicles
 
 # Define the app layout
@@ -164,9 +145,11 @@ def update_vehicles(n):
     # Update vehicle positions
     updated_vehicles = update_vehicle_positions(vehicles)
     markers = []
+    current_time = time.time()
     for vehicle in updated_vehicles:
-        if vehicle['waiting_time'] > 0:
-            continue  # Vehicle is waiting, do not display
+        if current_time < vehicle['hidden_until']:
+            # Skip rendering the vehicle if it's in the hidden state
+            continue
         lat, lon = vehicle['current_position']
         marker = dl.Marker(
             position=[lat, lon],
@@ -176,7 +159,7 @@ def update_vehicles(n):
                 'iconAnchor': [10, 10],
                 'className': 'car-marker'  
             },
-            id=f"vehicle_{vehicle['id']}_{vehicle['restart_count']}"  # Include restart_count in id
+            id=f"vehicle_{vehicle['id']}_{vehicle['loop_count']}"  # Set a unique id
         )
         markers.append(marker)
     return markers
