@@ -8,13 +8,16 @@ import networkx as nx
 import pandas as pd
 import random
 import math
+from shapely.geometry import LineString
 
 # Set up API key
 apiKey = '7QIl8HqHstNjUcx5Ljvd5zWr0OAzAJor'  # Replace with your TomTom API key
 
-# Define the starting latitude and longitude (e.g., for San Francisco)
-startLat = 37.771    # Latitude of San Francisco
-startLon = -122.4240  # Longitude of San Francisco
+# Define the starting latitude and longitude
+startLat = 37.74862   # Latitude
+startLon = -122.4228  # Longitude
+
+37.74862426632362, -122.42287825141584
 
 # Initialize the Dash app
 app = dash.Dash(__name__)
@@ -39,30 +42,98 @@ def generate_random_route(G):
         return None
 
 # Generate routes for multiple vehicles
-num_vehicles = 10
+num_vehicles = 100
 vehicles = []
-for _ in range(num_vehicles):
+for idx in range(num_vehicles):
     route = None
-    while route is None:
+    while route is None or len(route) < 2:
         route = generate_random_route(G)
+    # Initialize vehicle data
+    u = route[0]
+    v = route[1]
+    edge_data = G.get_edge_data(u, v)
+    if edge_data is None:
+        continue  # Skip if no edge between u and v
+    edge_data = list(edge_data.values())[0]
+    edge_length = edge_data.get('length')
+    edge_geometry = edge_data.get('geometry')
+    if edge_geometry is None:
+        x1, y1 = G.nodes[u]['x'], G.nodes[u]['y']
+        x2, y2 = G.nodes[v]['x'], G.nodes[v]['y']
+        edge_geometry = LineString([(x1, y1), (x2, y2)])
     vehicles.append({
+        'id': idx,
         'route': route,
-        'position_index': 0,  # Start at the first node
-        'speed': random.uniform(5, 15)  # Speed in meters per second
+        'edge_index': 0,  # Start at the first edge
+        'distance_traveled_on_edge': 0.0,
+        'edge_length': edge_length,
+        'edge_geometry': edge_geometry,
+        'speed': 20,  # Speed in meters per second
+        'current_position': (G.nodes[u]['y'], G.nodes[u]['x']),
+        'initial_position': (G.nodes[u]['y'], G.nodes[u]['x']),  # Save initial position
+        'waiting_time': 0,  # Time the vehicle waits before restarting
+        'restart_count': 0  # Number of times the vehicle has restarted
     })
 
 # Function to update vehicle positions
-def update_vehicle_positions(vehicles):
+def update_vehicle_positions(vehicles, delta_time=1.0):
     for vehicle in vehicles:
-        # Increment position index based on speed
-        vehicle['position_index'] += 1
-        if vehicle['position_index'] >= len(vehicle['route']):
-            vehicle['position_index'] = 0  # Loop back to start
+        if vehicle['waiting_time'] > 0:
+            vehicle['waiting_time'] -= delta_time
+            if vehicle['waiting_time'] <= 0:
+                # Reset vehicle to initial position
+                vehicle['edge_index'] = 0
+                vehicle['distance_traveled_on_edge'] = 0.0
+                vehicle['current_position'] = vehicle['initial_position']
+                vehicle['restart_count'] += 1  # Increment restart count
+                # Re-initialize edge_length and edge_geometry
+                u = vehicle['route'][vehicle['edge_index']]
+                v = vehicle['route'][vehicle['edge_index'] + 1]
+                edge_data = G.get_edge_data(u, v)
+                if edge_data is None:
+                    continue  # Skip if no edge between u and v
+                edge_data = list(edge_data.values())[0]
+                vehicle['edge_length'] = edge_data.get('length')
+                vehicle['edge_geometry'] = edge_data.get('geometry')
+                if vehicle['edge_geometry'] is None:
+                    x1, y1 = G.nodes[u]['x'], G.nodes[u]['y']
+                    x2, y2 = G.nodes[v]['x'], G.nodes[v]['y']
+                    vehicle['edge_geometry'] = LineString([(x1, y1), (x2, y2)])
+            else:
+                # Vehicle is waiting, do not update position
+                continue
+        else:
+            delta_distance = vehicle['speed'] * delta_time
+            vehicle['distance_traveled_on_edge'] += delta_distance
+            while vehicle['distance_traveled_on_edge'] >= vehicle['edge_length']:
+                vehicle['distance_traveled_on_edge'] -= vehicle['edge_length']
+                vehicle['edge_index'] += 1
+                if vehicle['edge_index'] >= len(vehicle['route']) - 1:
+                    vehicle['waiting_time'] = 10  # Set waiting time to 10 seconds
+                    break  # Exit the loop and stop moving
+                u = vehicle['route'][vehicle['edge_index']]
+                v = vehicle['route'][vehicle['edge_index'] + 1]
+                edge_data = G.get_edge_data(u, v)
+                if edge_data is None:
+                    continue  # Skip if no edge between u and v
+                edge_data = list(edge_data.values())[0]
+                vehicle['edge_length'] = edge_data.get('length')
+                vehicle['edge_geometry'] = edge_data.get('geometry')
+                if vehicle['edge_geometry'] is None:
+                    x1, y1 = G.nodes[u]['x'], G.nodes[u]['y']
+                    x2, y2 = G.nodes[v]['x'], G.nodes[v]['y']
+                    vehicle['edge_geometry'] = LineString([(x1, y1), (x2, y2)])
+            else:
+                # progress along edge
+                progress = vehicle['distance_traveled_on_edge'] / vehicle['edge_length']
+                position = vehicle['edge_geometry'].interpolate(progress, normalized=True)
+                vehicle['current_position'] = (position.y, position.x)
     return vehicles
 
 # Define the app layout
 app.layout = html.Div([
     html.H1("Interactive Zoomable Map with Traffic Flow Overlay and Simulated Traffic"),
+    html.Button('Stop Animation', id='stop-button', n_clicks=0),  # Add the button here
     html.Div([
         html.Div([
             html.Pre(id='info', children='Click on the map to get traffic data.')
@@ -71,7 +142,7 @@ app.layout = html.Div([
             dl.Map(
                 id="map",
                 center=[startLat, startLon],
-                zoom=13,
+                zoom=15,
                 style={'width': '100%', 'height': '800px'},
                 children=[
                     dl.TileLayer(id='basemap', url=f"https://api.tomtom.com/map/1/tile/basic/main/{{z}}/{{x}}/{{y}}.png?tileSize=256&key={apiKey}", attribution='&copy; TomTom'),
@@ -96,17 +167,37 @@ def update_vehicles(n):
     updated_vehicles = update_vehicle_positions(vehicles)
     markers = []
     for vehicle in updated_vehicles:
-        # Get current position
-        node = vehicle['route'][vehicle['position_index']]
-        lat = G.nodes[node]['y']
-        lon = G.nodes[node]['x']
-        marker = dl.Marker(position=[lat, lon], icon={
-            'iconUrl': '/assets/car.png',
-            'iconSize': [25, 25],
-            'iconAnchor': [10, 10],
-        })
+        if vehicle['waiting_time'] > 0:
+            continue  # Vehicle is waiting, do not display
+        lat, lon = vehicle['current_position']
+        marker = dl.Marker(
+            position=[lat, lon],
+            icon={
+                'iconUrl': '/assets/car.png',
+                'iconSize': [25, 25],
+                'iconAnchor': [10, 10],
+                'className': 'car-marker'  
+            },
+            id=f"vehicle_{vehicle['id']}_{vehicle['restart_count']}"  # Include restart_count in id
+        )
         markers.append(marker)
     return markers
+
+# Callback to toggle animation
+@app.callback(
+    [Output('interval', 'disabled'),
+     Output('stop-button', 'children')],
+    [Input('stop-button', 'n_clicks')]
+)
+def toggle_animation(n_clicks):
+    if n_clicks is None:
+        n_clicks = 0
+    if n_clicks % 2 == 0:
+        # Animation is running
+        return False, 'Stop Animation'
+    else:
+        # Animation is stopped
+        return True, 'Start Animation'
 
 # Define the callback to handle click events
 @app.callback(

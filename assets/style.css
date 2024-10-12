@@ -1,0 +1,4 @@
+/* Apply the animation only to the car markers */
+.car-marker.leaflet-marker-icon.leaflet-zoom-animated {
+    transition: transform 1s linear;
+}
