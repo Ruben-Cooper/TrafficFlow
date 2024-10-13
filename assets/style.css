@@ -1,4 +1,10 @@
-/* Apply the animation only to the car markers */
-.car-marker.leaflet-marker-icon.leaflet-zoom-animated {
+/* Apply the animation to the car markers */
+.car-marker.leaflet-marker-icon {
     transition: transform 1s linear;
+}
+
+/* Disable transition when the map is being zoomed or panned */
+.leaflet-zoom-anim .car-marker.leaflet-marker-icon,
+.leaflet-dragging .car-marker.leaflet-marker-icon {
+    transition: none !important;
 }

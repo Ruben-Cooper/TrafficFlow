@@ -1,9 +1,10 @@
 import dash
-from dash import html, Output, Input, dcc
+from dash import html, Output, Input, State, dcc
 import dash_leaflet as dl
 import requests
 import os
 import pandas as pd
+import dash_bootstrap_components as dbc
 from datetime import datetime
 
 # Set up API key
@@ -13,8 +14,9 @@ apiKey = '7QIl8HqHstNjUcx5Ljvd5zWr0OAzAJor'  # Replace with your TomTom API key
 startLat = 37.74862   # Latitude
 startLon = -122.4228  # Longitude
 
-# Initialize the Dash app
-app = dash.Dash(__name__)
+# Initialize the Dash app with Bootstrap CSS
+external_stylesheets = [dbc.themes.BOOTSTRAP]
+app = dash.Dash(__name__, external_stylesheets=external_stylesheets)
 
 # Read taxi data
 data_folder = 'data'
@@ -56,24 +58,34 @@ max_date = max(unique_dates)
 min_date_str = min_date.isoformat()
 max_date_str = max_date.isoformat()
 
-# Define the app layout
-app.layout = html.Div([
-    html.H1("Interactive Map with Simulated Taxi Traffic"),
-    html.Button('Stop Animation', id='stop-button', n_clicks=0),
-    html.Div([
+# Define Navbar
+navbar = dbc.NavbarSimple(
+    brand="Taxi Traffic Simulator",
+    brand_href="#",
+    color="primary",
+    dark=True,
+    fluid=True,
+)
+
+# Define controls
+controls = dbc.Card([
+    dbc.CardHeader("Simulation Controls"),
+    dbc.CardBody([
         html.Div([
-            html.Pre(id='info', children='Click on the map to get traffic data.'),
-            html.Div(id='current-time-display'),
-            html.Label('Select Date:'),
+            dbc.Label('Select Date:'),
             dcc.DatePickerSingle(
                 id='date-picker',
                 min_date_allowed=min_date_str,
                 max_date_allowed=max_date_str,
                 date=min_date_str,
-                display_format='YYYY-MM-DD'
+                display_format='YYYY-MM-DD',
+                style={'width': '100%'}
             ),
-            html.Label('Simulation Speed:'),
-            dcc.RadioItems(
+        ]),
+        html.Br(),
+        html.Div([
+            dbc.Label('Simulation Speed:'),
+            dbc.RadioItems(
                 id='speed-multiplier',
                 options=[
                     {'label': '1x', 'value': 1},
@@ -81,16 +93,59 @@ app.layout = html.Div([
                     {'label': '4x', 'value': 4},
                     {'label': '8x', 'value': 8},
                 ],
-                value=1,  # default to 1x speed
-                labelStyle={'display': 'inline-block'}
-            )
-        ], style={'width': '25%', 'display': 'inline-block', 'vertical-align': 'top'}),
+                value=1,
+                inline=True
+            ),
+        ]),
+        html.Br(),
         html.Div([
+            dbc.Label('Simulation Time:'),
+            dcc.Slider(
+                id='time-slider',
+                min=0,
+                max=24*60*60 - 1,
+                step=60,
+                value=0,
+                marks={i*3600: f'{i:02d}:00' for i in range(0, 25, 3)},
+                tooltip={'always_visible': False, 'placement': 'bottom'}
+            ),
+        ]),
+        html.Br(),
+        dbc.Button('Stop Animation', id='stop-button', n_clicks=0, color='primary', className='mr-1'),
+        html.Br(),
+        html.Br(),
+        html.Div(id='current-time-display'),
+    ])
+])
+
+# Define the app layout
+app.layout = dbc.Container([
+    navbar,
+    dbc.Row([
+        dbc.Col([
+            html.Br(),
+            controls,
+            html.Br(),
+            dbc.Card([
+                dbc.CardHeader("Map Information"),
+                dbc.CardBody([
+                    html.P(id='info', children='Click on the map to get traffic data.')
+                ])
+            ]),
+            # Hidden div to store simulation data
+            dcc.Store(id='simulation-data', data={
+                'current_time': None,
+                'last_update_timestamp': None,
+                'slider_value': None,
+                'selected_date': None
+            })
+        ], width=3, style={'padding': '20px'}),
+        dbc.Col([
             dl.Map(
                 id="map",
                 center=[startLat, startLon],
                 zoom=12,
-                style={'width': '100%', 'height': '800px'},
+                style={'width': '100%', 'height': 'calc(100vh - 70px)'},
                 children=[
                     dl.TileLayer(id='basemap', url=f"https://api.tomtom.com/map/1/tile/basic/main/{{z}}/{{x}}/{{y}}.png?tileSize=256&key={apiKey}", attribution='&copy; TomTom'),
                     dl.TileLayer(id='traffic', url=f"https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{{z}}/{{x}}/{{y}}.png?tileSize=256&key={apiKey}", opacity=0.7),
@@ -100,53 +155,118 @@ app.layout = html.Div([
             ),
             # Interval component for updating vehicle positions
             dcc.Interval(id='interval', interval=1000, n_intervals=0)
-        ], style={'width': '75%', 'display': 'inline-block'})
-    ])
-])
+        ], width=9, style={'padding': '0px'})
+    ], style={'margin': '0px'})
+], fluid=True)
 
 # Callback to update vehicle positions
 @app.callback(
     [Output('vehicles', 'children'),
-     Output('current-time-display', 'children')],
+     Output('current-time-display', 'children'),
+     Output('simulation-data', 'data')],
     [Input('interval', 'n_intervals'),
      Input('speed-multiplier', 'value'),
      Input('date-picker', 'date'),
-     Input('stop-button', 'n_clicks')]
+     Input('stop-button', 'n_clicks'),
+     Input('time-slider', 'value')],
+    [State('simulation-data', 'data')]
 )
-def update_vehicles(n_intervals, speed_multiplier, selected_date, n_clicks):
-    # Determine if animation is stopped
-    if n_clicks % 2 != 0:
-        return dash.no_update, dash.no_update  # Do not update if stopped
+def update_vehicles(n_intervals, speed_multiplier, selected_date, n_clicks, time_slider_value, sim_data):
+    from datetime import datetime
+
+    # Handle None values for time_slider_value and selected_date
+    if time_slider_value is None:
+        time_slider_value = 0
 
     if selected_date is None:
-        return dash.no_update, 'No date selected.'
+        selected_date = min_date_str  # Default to min_date_str
 
-    # Convert selected_date to datetime
-    selected_date = pd.to_datetime(selected_date)
+    if sim_data is None:
+        sim_data = {
+            'current_time': None,
+            'last_update_timestamp': None,
+            'slider_value': None,
+            'selected_date': None
+        }
 
-    # Get the start timestamp of the selected day
-    start_of_day = pd.Timestamp(selected_date).tz_localize(None)
-    start_time = int(start_of_day.timestamp())
+    # Get current real time
+    current_real_time = datetime.now().timestamp()
 
-    # delta_time is 1 second * speed_multiplier
-    delta_time = 1 * speed_multiplier
+    last_update_timestamp = sim_data.get('last_update_timestamp', None)
+    current_time = sim_data.get('current_time', None)
+    prev_slider_value = sim_data.get('slider_value', None)
+    prev_selected_date = sim_data.get('selected_date', None)
 
-    # current_time is start_time + n_intervals * delta_time
-    current_time = start_time + n_intervals * delta_time
+    # Determine if animation is stopped
+    if n_clicks % 2 != 0:
+        # Animation is stopped
+        if prev_slider_value != time_slider_value or prev_selected_date != selected_date:
+            # Slider value or date changed, update current_time
+            selected_date_dt = pd.to_datetime(selected_date)
+            start_of_day = pd.Timestamp(selected_date_dt).tz_localize(None)
+            current_time = start_of_day.timestamp() + time_slider_value
+            sim_data['current_time'] = current_time
+            sim_data['slider_value'] = time_slider_value
+            sim_data['selected_date'] = selected_date
+            sim_data['last_update_timestamp'] = current_real_time
+        else:
+            # Animation is stopped, do not update
+            current_time_str = pd.to_datetime(sim_data['current_time'], unit='s').strftime('%Y-%m-%d %H:%M:%S')
+            return dash.no_update, f"Current Time: {current_time_str}", sim_data
+    else:
+        # Animation is running
+        if prev_slider_value != time_slider_value or prev_selected_date != selected_date:
+            # Slider value or date changed, reset current_time
+            selected_date_dt = pd.to_datetime(selected_date)
+            start_of_day = pd.Timestamp(selected_date_dt).tz_localize(None)
+            current_time = start_of_day.timestamp() + time_slider_value
+            last_update_timestamp = current_real_time
+        else:
+            if last_update_timestamp is None or current_time is None:
+                # Initialize current_time
+                selected_date_dt = pd.to_datetime(selected_date)
+                start_of_day = pd.Timestamp(selected_date_dt).tz_localize(None)
+                current_time = start_of_day.timestamp() + time_slider_value
+                last_update_timestamp = current_real_time
+            else:
+                # Compute delta_real_time
+                delta_real_time = current_real_time - last_update_timestamp
+
+                # Compute delta_simulation_time
+                delta_simulation_time = delta_real_time * speed_multiplier
+
+                # Update current_time
+                current_time += delta_simulation_time
+
+    # Update sim_data
+    sim_data['current_time'] = current_time
+    sim_data['last_update_timestamp'] = current_real_time
+    sim_data['slider_value'] = time_slider_value
+    sim_data['selected_date'] = selected_date
 
     # Check if current_time exceeds the max time for the selected day
+    selected_date_dt = pd.to_datetime(selected_date)
+    start_of_day = pd.Timestamp(selected_date_dt).tz_localize(None)
     end_of_day = start_of_day + pd.Timedelta(days=1)
-    end_time = int(end_of_day.timestamp())
+    end_time = end_of_day.timestamp()
 
     if current_time > end_time:
-        return dash.no_update, 'End of day reached.'
+        sim_data['current_time'] = end_time  # Ensure it doesn't go beyond
+        current_time_str = pd.to_datetime(sim_data['current_time'], unit='s').strftime('%Y-%m-%d %H:%M:%S')
+        return dash.no_update, f"Current Time: {current_time_str}", sim_data
 
-    # Define a time window for active taxis (e.g., taxis that have data within the last 60 seconds)
-    time_window = 60  # seconds
+    # Update the time slider position if animation is running
+    if n_clicks % 2 == 0:
+        elapsed_seconds = current_time - start_of_day.timestamp()
+        if elapsed_seconds > 24*3600:
+            elapsed_seconds = 24*3600 - 1
+        # Update the slider value in sim_data
+        sim_data['slider_value'] = elapsed_seconds
 
-    # Filter data for the selected day within the time window
-    min_time = current_time - time_window
-    df_current = taxi_data[(taxi_data['time'] >= min_time) & (taxi_data['time'] <= current_time + time_window)]
+    # Filter data for the selected day
+    selected_date_start = start_of_day.timestamp()
+    selected_date_end = end_of_day.timestamp()
+    df_current = taxi_data[(taxi_data['time'] >= selected_date_start) & (taxi_data['time'] <= selected_date_end)]
 
     # Group by taxi_id
     grouped = df_current.groupby('taxi_id')
@@ -185,9 +305,10 @@ def update_vehicles(n_intervals, speed_multiplier, selected_date, n_clicks):
             lat = lat0 + (lat1 - lat0) * ratio
             lon = lon0 + (lon1 - lon0) * ratio
         else:
-            # No next point, check if the previous point is within the time window
+            # No next point, use last known position if within threshold
             time_diff = current_time - prev_point['time']
-            if time_diff > time_window:
+            max_time_diff = 600  # seconds (10 minutes)
+            if time_diff > max_time_diff:
                 continue  # Taxi is inactive
             else:
                 # Use last known position
@@ -200,15 +321,15 @@ def update_vehicles(n_intervals, speed_multiplier, selected_date, n_clicks):
             icon={
                 'iconUrl': '/assets/car.png',
                 'iconSize': [25, 25],
-                'iconAnchor': [10, 10],
-                'className': 'car-marker'  
+                'iconAnchor': [12, 12],
+                'className': 'car-marker'
             },
             id=f"vehicle_{taxi_id}"
         )
         markers.append(marker)
 
-    current_time_str = pd.to_datetime(current_time, unit='s').strftime('%Y-%m-%d %H:%M:%S')
-    return markers, f"Current Time: {current_time_str}"
+    current_time_str = pd.to_datetime(sim_data['current_time'], unit='s').strftime('%Y-%m-%d %H:%M:%S')
+    return markers, f"Current Time: {current_time_str}", sim_data
 
 # Callback to toggle animation
 @app.callback(
@@ -226,6 +347,16 @@ def toggle_animation(n_clicks):
         # Animation is stopped
         return True, 'Start Animation'
 
+# Callback to update the time slider when animation is running
+@app.callback(
+    Output('time-slider', 'value'),
+    [Input('simulation-data', 'data')]
+)
+def update_time_slider(sim_data):
+    if sim_data is None:
+        return 0
+    return sim_data.get('slider_value', 0)
+
 # Define the callback to handle click events
 @app.callback(
     [Output('info', 'children'),
@@ -234,7 +365,7 @@ def toggle_animation(n_clicks):
 )
 def display_click_info(clickData):
     if not clickData:
-        return 'Click on the map to get traffic data.', []
+        return dcc.Markdown('Click on the map to get traffic data.'), []
     else:
         # Extract latitude and longitude from clickData
         lat = clickData['latlng']['lat']
@@ -257,13 +388,15 @@ def display_click_info(clickData):
             confidence = trafficData.get('confidence')
             roadClosure = trafficData.get('roadClosure')
 
-            # Format the response for display
-            formatted_response = f"""Current Speed: {currentSpeed} km/h
-Free Flow Speed: {freeFlowSpeed} km/h
-Current Travel Time: {currentTravelTime} seconds
-Free Flow Travel Time: {freeFlowTravelTime} seconds
-Confidence: {confidence}
-Road Closure: {'Yes' if roadClosure else 'No'}"""
+            # Format the response for display using HTML for line breaks
+            formatted_response = html.Div([
+                html.B("Current Speed:"), f" {currentSpeed} km/h", html.Br(),
+                html.B("Free Flow Speed:"), f" {freeFlowSpeed} km/h", html.Br(),
+                html.B("Current Travel Time:"), f" {currentTravelTime} seconds", html.Br(),
+                html.B("Free Flow Travel Time:"), f" {freeFlowTravelTime} seconds", html.Br(),
+                html.B("Confidence:"), f" {confidence}", html.Br(),
+                html.B("Road Closure:"), f" {'Yes' if roadClosure else 'No'}"
+            ])
 
             # Add a marker to the map at the clicked location
             marker = dl.Marker(position=[lat, lon], children=[
@@ -272,14 +405,20 @@ Road Closure: {'Yes' if roadClosure else 'No'}"""
             ])
 
             # Display the response
-            info_text = f"""Clicked at Latitude: {round(lat, 6)} Longitude: {round(lon, 6)}
-Traffic Data:
-{formatted_response}"""
+            info_text = html.Div([
+                html.B("Latitude:"), f" {round(lat, 6)} ",html.Br(),
+                html.B("Longitude:"), f" {round(lon, 6)}", html.Br(), html.Br(),
+                formatted_response
+            ])
+            
             return info_text, [marker]
         else:
             # Handle API errors
-            info_text = f"""Clicked at Latitude: {round(lat, 6)} Longitude: {round(lon, 6)}
-Error fetching traffic data."""
+            info_text = html.Div([
+                html.B("Latitude:"), f" {round(lat, 6)} ",html.Br(),
+                html.B("Longitude:"), f" {round(lon, 6)}", html.Br(), html.Br(),
+                "Error fetching traffic data."
+            ])
             return info_text, []
 
 # Run the app

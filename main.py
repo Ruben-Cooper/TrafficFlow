@@ -14,8 +14,8 @@ from shapely.geometry import LineString
 apiKey = '7QIl8HqHstNjUcx5Ljvd5zWr0OAzAJor'  # Replace with your TomTom API key
 
 # Define the starting latitude and longitude
-startLat = 37.74862   # Latitude
-startLon = -122.4228  # Longitude
+startLat = -27.4735  # Latitude
+startLon = 153.0291  # Longitude
 
 # Initialize the Dash app
 app = dash.Dash(__name__)
@@ -40,7 +40,7 @@ def generate_random_route(G):
         return None
 
 # Generate routes for multiple vehicles
-num_vehicles = 50
+num_vehicles = 100
 vehicles = []
 for idx in range(num_vehicles):
     route = None
