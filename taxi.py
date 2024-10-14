@@ -60,7 +60,7 @@ max_date_str = max_date.isoformat()
 
 # Define Navbar
 navbar = dbc.NavbarSimple(
-    brand="Taxi Traffic Simulator",
+    brand="San Francisco Historical Traffic Visualisation",
     brand_href="#",
     color="primary",
     dark=True,
@@ -147,7 +147,7 @@ app.layout = dbc.Container([
                 zoom=12,
                 style={'width': '100%', 'height': 'calc(100vh - 70px)'},
                 children=[
-                    dl.TileLayer(id='basemap', url=f"https://api.tomtom.com/map/1/tile/basic/main/{{z}}/{{x}}/{{y}}.png?tileSize=256&key={apiKey}", attribution='&copy; TomTom'),
+                    dl.TileLayer(id='basemap', url=f"https://api.tomtom.com/map/1/tile/basic/main/{{z}}/{{x}}/{{y}}.png?tileSize=256&key={apiKey}", attribution='&copy; TomTom, &copy; CRAWDAD'),
                     dl.TileLayer(id='traffic', url=f"https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{{z}}/{{x}}/{{y}}.png?tileSize=256&key={apiKey}", opacity=0.7),
                     dl.LayerGroup(id="layer"),
                     dl.LayerGroup(id="vehicles")
